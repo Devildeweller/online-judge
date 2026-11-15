@@ -1,0 +1,61 @@
+#!/bin/sh
+# oj-run: in-container supervisor for untrusted programs.
+#
+#   oj-run WALL_SECONDS STDERR_MAX_BYTES COMMAND [ARGS...]
+#
+# Runs as root inside the sandbox container (which only holds SETUID, SETGID and KILL), drops to
+# the unprivileged sandbox user for COMMAND, enforces the wall-clock limit, then reports usage.
+#
+#   stdin   -> passed to COMMAND
+#   stdout  <- COMMAND's stdout, untouched
+#   stderr  <- first STDERR_MAX_BYTES of COMMAND's stderr, then one line:
+#              @@OJ@@ exit=<code> wall=<s> user=<s> sys=<s> rss=<kB> oom=<0|1>
+#
+# COMMAND's stderr and the timing data are kept in /run/oj, which only root can read or write,
+# so the program cannot forge its own report.
+set -u
+
+WALL="$1"
+ERRMAX="$2"
+shift 2
+
+STATE=/run/oj
+ERR="$STATE/stderr.$$"
+META="$STATE/usage.$$"
+SANDBOX_UID=10001
+SANDBOX_GID=10001
+
+oom_kills() {
+  n=$(awk '$1 == "oom_kill" { print $2 }' /sys/fs/cgroup/memory.events 2>/dev/null)
+  echo "${n:-0}"
+}
+
+OOM_BEFORE=$(oom_kills)
+
+# TERM first so `timeout` stays alive to reap the program and its CPU time is accounted for;
+# a program that ignores TERM is killed one second later.
+/usr/bin/time -q -f '%e %U %S %M' -o "$META" \
+  timeout --signal=TERM --kill-after=1 "$WALL" \
+  setpriv --reuid="$SANDBOX_UID" --regid="$SANDBOX_GID" --clear-groups --no-new-privs \
+  "$@" 2>"$ERR"
+CODE=$?
+
+# Reap anything the program left running (background children, fork attempts).
+setpriv --reuid="$SANDBOX_UID" --regid="$SANDBOX_GID" --clear-groups kill -9 -1 2>/dev/null
+
+OOM_AFTER=$(oom_kills)
+OOM=0
+[ "$OOM_AFTER" -gt "$OOM_BEFORE" ] 2>/dev/null && OOM=1
+
+USAGE=$(tail -n 1 "$META" 2>/dev/null)
+set -- $USAGE
+WALL_USED="${1:-0}"
+USER_USED="${2:-0}"
+SYS_USED="${3:-0}"
+RSS="${4:-0}"
+
+head -c "$ERRMAX" "$ERR" >&2 2>/dev/null
+printf '\n@@OJ@@ exit=%s wall=%s user=%s sys=%s rss=%s oom=%s\n' "$CODE" "$WALL_USED" "$USER_USED" "$SYS_USED" "$RSS" "$OOM" >&2
+
+rm -f "$ERR" "$META"
+exit 0

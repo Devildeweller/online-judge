@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum Language {
+  CPP
+  PYTHON
+  JAVA
+  JAVASCRIPT
+}
+
+enum CheckerType {
+  LINES
+  TOKENS
+  FLOAT
+}
+
+enum SubmissionStatus {
+  QUEUED
+  COMPILING
+  RUNNING
+  COMPLETED
+}
+
+enum Verdict {
+  ACCEPTED
+  WRONG_ANSWER
+  TIME_LIMIT_EXCEEDED
+  MEMORY_LIMIT_EXCEEDED
+  OUTPUT_LIMIT_EXCEEDED
+  RUNTIME_ERROR
+  COMPILATION_ERROR
+  INTERNAL_ERROR
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(USER)
+  bio          String?
+  solvedCount  Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  submissions   Submission[]
+  problems      Problem[]
+  contests      Contest[]
+  registrations ContestRegistration[]
+
+  @@index([solvedCount])
+}
+
+model Problem {
+  id              Int         @id @default(autoincrement())
+  slug            String      @unique
+  title           String
+  statement       String
+  inputFormat     String
+  outputFormat    String
+  constraints     String
+  difficulty      Difficulty
+  tags            String[]
+  timeLimitMs     Int         @default(1000)
+  memoryLimitMb   Int         @default(256)
+  checker         CheckerType @default(LINES)
+  isPublic        Boolean     @default(false)
+  submissionCount Int         @default(0)
+  acceptedCount   Int         @default(0)
+  authorId        Int
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  author      User             @relation(fields: [authorId], references: [id])
+  testCases   TestCase[]
+  submissions Submission[]
+  contests    ContestProblem[]
+
+  @@index([isPublic, difficulty])
+}
+
+model TestCase {
+  id             Int     @id @default(autoincrement())
+  problemId      Int
+  position       Int
+  input          String
+  expectedOutput String
+  isSample       Boolean @default(false)
+  explanation    String?
+
+  problem Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@unique([problemId, position])
+}
+
+model Contest {
+  id             Int      @id @default(autoincrement())
+  slug           String   @unique
+  title          String
+  description    String
+  startTime      DateTime
+  endTime        DateTime
+  penaltyMinutes Int      @default(20)
+  isPublic       Boolean  @default(true)
+  createdById    Int
+  createdAt      DateTime @default(now())
+
+  createdBy     User                  @relation(fields: [createdById], references: [id])
+  problems      ContestProblem[]
+  registrations ContestRegistration[]
+  submissions   Submission[]
+
+  @@index([startTime])
+}
+
+model ContestProblem {
+  contestId Int
+  problemId Int
+  label     String
+  position  Int
+
+  contest Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  problem Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@id([contestId, problemId])
+  @@unique([contestId, label])
+}
+
+model ContestRegistration {
+  contestId Int
+  userId    Int
+  createdAt DateTime @default(now())
+
+  contest Contest @relation(fields: [contestId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([contestId, userId])
+}
+
+model Submission {
+  id            Int              @id @default(autoincrement())
+  userId        Int
+  problemId     Int
+  contestId     Int?
+  language      Language
+  sourceCode    String
+  status        SubmissionStatus @default(QUEUED)
+  verdict       Verdict?
+  timeMs        Int?
+  memoryKb      Int?
+  passedTests   Int              @default(0)
+  totalTests    Int              @default(0)
+  failedTest    Int?
+  compileOutput String?
+  errorMessage  String?
+  createdAt     DateTime         @default(now())
+  judgedAt      DateTime?
+
+  user    User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem Problem                @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  contest Contest?               @relation(fields: [contestId], references: [id], onDelete: SetNull)
+  results SubmissionTestResult[]
+
+  @@index([userId, createdAt])
+  @@index([problemId, verdict])
+  @@index([contestId, userId])
+  @@index([createdAt])
+}
+
+model SubmissionTestResult {
+  id           Int     @id @default(autoincrement())
+  submissionId Int
+  position     Int
+  verdict      Verdict
+  timeMs       Int
+  memoryKb     Int
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@unique([submissionId, position])
+}

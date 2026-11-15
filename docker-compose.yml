@@ -1,0 +1,124 @@
+name: online-judge
+
+# Development:   docker compose up -d postgres redis      (API, worker and web run on the host with npm run dev)
+# Everything:    docker compose --profile app up --build  (then open http://localhost:8080)
+
+x-server-env: &server-env
+  NODE_ENV: production
+  DATABASE_URL: postgresql://oj:oj_dev_password@postgres:5432/online_judge
+  REDIS_URL: redis://redis:6379
+  JWT_SECRET: ${JWT_SECRET:-dev-only-secret-change-me-please-0123456789}
+  CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+  SANDBOX_IMAGE: oj-sandbox:latest
+  ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+  ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+  ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: oj
+      POSTGRES_PASSWORD: oj_dev_password
+      POSTGRES_DB: online_judge
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oj -d online_judge"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # noeviction: the job queue must never lose keys under memory pressure.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Build-only: produces the image the worker starts sandbox containers from.
+  sandbox-image:
+    profiles: ["app"]
+    image: oj-sandbox:latest
+    build: ./docker/sandbox
+    entrypoint: ["true"]
+    restart: "no"
+
+  # One-shot: applies migrations and seeds the demo data, then exits.
+  migrate:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: oj-server:latest
+    environment: *server-env
+    command: ["sh", "-c", "npx prisma migrate deploy && node dist/seed/index.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    profiles: ["app"]
+    image: oj-server:latest
+    restart: unless-stopped
+    environment:
+      <<: *server-env
+      PORT: "4000"
+    command: ["node", "dist/api/index.js"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker:
+    profiles: ["app"]
+    image: oj-server:latest
+    restart: unless-stopped
+    environment:
+      <<: *server-env
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-2}
+    command: ["node", "dist/worker/index.js"]
+    volumes:
+      # The worker talks to the host Docker daemon to start sibling sandbox containers.
+      # Sources and inputs are streamed over stdin, so no host paths are shared with them.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      sandbox-image:
+        condition: service_completed_successfully
+
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    image: oj-web:latest
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
